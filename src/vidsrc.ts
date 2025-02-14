@@ -29,10 +29,15 @@ async function serversLoad(html: string): Promise<{ servers: Servers[]; title: s
   const title = $("title").text() ?? "";
   const base = $("iframe").attr("src") ?? "";
 
-  if (base && !base.startsWith("http")) {
-    BASEDOM = new URL(base.startsWith("//") ? "https:" + base : base).origin ?? BASEDOM;
-  } else {
-    console.error("Invalid base URL:", base);
+  // Ensure base is a valid URL
+  try {
+    if (base && !base.startsWith("http")) {
+      BASEDOM = new URL(base.startsWith("//") ? "https:" + base : base).origin ?? BASEDOM;
+    } else if (!base) {
+      throw new Error("Base URL from iframe is empty.");
+    }
+  } catch (error) {
+    console.error("Error constructing BASEDOM URL from iframe src:", error);
   }
 
   $(".serversList .server").each((index, element) => {
@@ -48,8 +53,6 @@ async function serversLoad(html: string): Promise<{ servers: Servers[]; title: s
     title: title,
   };
 }
-
-async function SRCRCPhandler() {}
 
 async function PRORCPhandler(prorcp: string): Promise<string | null> {
   const prorcpFetch = await fetch(`${BASEDOM}/prorcp/${prorcp}`);
@@ -108,6 +111,7 @@ async function tmdbScrape(tmdbId: string, type: "movie" | "tv", season?: number,
     throw new Error("Invalid Data.");
   }
 
+  // Check if tmdbId is valid
   if (!tmdbId || (season && !episode)) {
     throw new Error("Invalid tmdbId or season/episode data");
   }
@@ -116,40 +120,47 @@ async function tmdbScrape(tmdbId: string, type: "movie" | "tv", season?: number,
     ? `https://vidsrc.net/embed/${type}?tmdb=${tmdbId}`
     : `https://vidsrc.net/embed/${type}?tmdb=${tmdbId}&season=${season}&episode=${episode}`;
 
-  console.log("Generated URL:", url);
+  // Log generated URL for debugging
+  console.log("Generated URL for tmdbScrape:", url);
 
-  const embed = await fetch(url);
-  const embedResp = await embed.text();
+  // Handle any URL issues
+  try {
+    const embed = await fetch(url);
+    const embedResp = await embed.text();
 
-  // Get some metadata
-  const { servers, title } = await serversLoad(embedResp);
+    // Get some metadata
+    const { servers, title } = await serversLoad(embedResp);
 
-  const rcpFetchPromises = servers.map(element => {
-    return fetch(`${BASEDOM}/rcp/${element.dataHash}`);
-  });
+    const rcpFetchPromises = servers.map(element => {
+      return fetch(`${BASEDOM}/rcp/${element.dataHash}`);
+    });
 
-  const rcpResponses = await Promise.all(rcpFetchPromises);
+    const rcpResponses = await Promise.all(rcpFetchPromises);
 
-  const prosrcrcp = await Promise.all(rcpResponses.map(async (response) => {
-    return rcpGrabber(await response.text());
-  }));
+    const prosrcrcp = await Promise.all(rcpResponses.map(async (response) => {
+      return rcpGrabber(await response.text());
+    }));
 
-  const apiResponse: APIResponse[] = [];
-  for (const item of prosrcrcp) {
-    if (!item) continue;
-    switch (item.data.substring(0, 8)) {
-      case "/prorcp/":
-        apiResponse.push({
-          name: title,
-          image: item.metadata.image,
-          mediaId: tmdbId,
-          stream: await PRORCPhandler(item.data.replace("/prorcp/", "")),
-          referer: BASEDOM,
-        });
-        break;
+    const apiResponse: APIResponse[] = [];
+    for (const item of prosrcrcp) {
+      if (!item) continue;
+      switch (item.data.substring(0, 8)) {
+        case "/prorcp/":
+          apiResponse.push({
+            name: title,
+            image: item.metadata.image,
+            mediaId: tmdbId,
+            stream: await PRORCPhandler(item.data.replace("/prorcp/", "")),
+            referer: BASEDOM,
+          });
+          break;
+      }
     }
+    return apiResponse;
+  } catch (error) {
+    console.error("Error fetching the URL:", url, error);
+    throw new Error("Error in tmdbScrape function.");
   }
-  return apiResponse;
 }
 
 export default tmdbScrape;
