@@ -27,17 +27,31 @@ async function serversLoad(html: string): Promise<{ servers: Servers[]; title: s
   const $ = cheerio.load(html);
   const servers: Servers[] = [];
   const title = $("title").text() ?? "";
-  const base = $("iframe").attr("src") ?? "";
 
-  // Ensure base is a valid URL
-  try {
-    if (base && !base.startsWith("http")) {
-      BASEDOM = new URL(base.startsWith("//") ? "https:" + base : base).origin ?? BASEDOM;
-    } else if (!base) {
-      throw new Error("Base URL from iframe is empty.");
+  // Grab the iframe src attribute (if available)
+  const baseAttr = $("iframe").attr("src");
+  if (baseAttr && baseAttr.trim() !== "") {
+    try {
+      let constructedUrl = "";
+      // If the src already starts with http or https, use it directly.
+      if (baseAttr.startsWith("http://") || baseAttr.startsWith("https://")) {
+        constructedUrl = baseAttr;
+      } else if (baseAttr.startsWith("//")) {
+        // Prepend "https:" if it starts with "//"
+        constructedUrl = "https:" + baseAttr;
+      } else {
+        // Otherwise, the format is unexpected – throw an error.
+        throw new Error("Unexpected iframe src format: " + baseAttr);
+      }
+      // Attempt to construct a URL
+      const parsedUrl = new URL(constructedUrl);
+      BASEDOM = parsedUrl.origin;
+    } catch (err) {
+      console.error("Error constructing BASEDOM from iframe src:", err);
+      // Optionally, you can decide to keep the default BASEDOM or handle the error differently.
     }
-  } catch (error) {
-    console.error("Error constructing BASEDOM URL from iframe src:", error);
+  } else {
+    console.error("No valid iframe src found, using default BASEDOM:", BASEDOM);
   }
 
   $(".serversList .server").each((index, element) => {
@@ -48,10 +62,7 @@ async function serversLoad(html: string): Promise<{ servers: Servers[]; title: s
     });
   });
 
-  return {
-    servers: servers,
-    title: title,
-  };
+  return { servers, title };
 }
 
 async function PRORCPhandler(prorcp: string): Promise<string | null> {
@@ -68,16 +79,15 @@ async function PRORCPhandler(prorcp: string): Promise<string | null> {
       accept: "*/*",
       "accept-language": "en-US,en;q=0.9",
       priority: "u=1",
-      "sec-ch-ua": "\"Chromium\";v=\"128\", \"Not;A=Brand\";v=\"24\", \"Google Chrome\";v=\"128\"",
+      "sec-ch-ua": `"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"`,
       "sec-ch-ua-mobile": "?0",
-      "sec-ch-ua-platform": "\"Windows\"",
+      "sec-ch-ua-platform": `"Windows"`,
       "sec-fetch-dest": "script",
       "sec-fetch-mode": "no-cors",
       "sec-fetch-site": "same-origin",
       Referer: `${BASEDOM}/`,
       "Referrer-Policy": "origin",
     },
-    body: null,
     method: "GET",
   });
 
@@ -86,7 +96,7 @@ async function PRORCPhandler(prorcp: string): Promise<string | null> {
   const decryptMatches = jsCode.match(decryptRegex);
 
   const $ = cheerio.load(prorcpResponse);
-  if (!decryptMatches || decryptMatches?.length < 3) return null;
+  if (!decryptMatches || decryptMatches.length < 3) return null;
 
   const id = decrypt(decryptMatches[2].toString().trim(), decryptMatches[1].toString().trim());
   const data = $("#" + id);
@@ -110,8 +120,6 @@ async function tmdbScrape(tmdbId: string, type: "movie" | "tv", season?: number,
   if (season && episode && type === "movie") {
     throw new Error("Invalid Data.");
   }
-
-  // Check if tmdbId is valid
   if (!tmdbId || (season && !episode)) {
     throw new Error("Invalid tmdbId or season/episode data");
   }
@@ -120,45 +128,42 @@ async function tmdbScrape(tmdbId: string, type: "movie" | "tv", season?: number,
     ? `https://vidsrc.net/embed/${type}?tmdb=${tmdbId}`
     : `https://vidsrc.net/embed/${type}?tmdb=${tmdbId}&season=${season}&episode=${episode}`;
 
-  // Log generated URL for debugging
   console.log("Generated URL for tmdbScrape:", url);
 
-  // Handle any URL issues
   try {
     const embed = await fetch(url);
     const embedResp = await embed.text();
 
-    // Get some metadata
+    // Get metadata from embed response
     const { servers, title } = await serversLoad(embedResp);
 
-    const rcpFetchPromises = servers.map(element => {
+    const rcpFetchPromises = servers.map((element) => {
       return fetch(`${BASEDOM}/rcp/${element.dataHash}`);
     });
-
     const rcpResponses = await Promise.all(rcpFetchPromises);
 
-    const prosrcrcp = await Promise.all(rcpResponses.map(async (response) => {
-      return rcpGrabber(await response.text());
-    }));
+    const prosrcrcp = await Promise.all(
+      rcpResponses.map(async (response) => {
+        return rcpGrabber(await response.text());
+      })
+    );
 
     const apiResponse: APIResponse[] = [];
     for (const item of prosrcrcp) {
       if (!item) continue;
-      switch (item.data.substring(0, 8)) {
-        case "/prorcp/":
-          apiResponse.push({
-            name: title,
-            image: item.metadata.image,
-            mediaId: tmdbId,
-            stream: await PRORCPhandler(item.data.replace("/prorcp/", "")),
-            referer: BASEDOM,
-          });
-          break;
+      if (item.data.substring(0, 8) === "/prorcp/") {
+        apiResponse.push({
+          name: title,
+          image: item.metadata.image,
+          mediaId: tmdbId,
+          stream: await PRORCPhandler(item.data.replace("/prorcp/", "")),
+          referer: BASEDOM,
+        });
       }
     }
     return apiResponse;
   } catch (error) {
-    console.error("Error fetching the URL:", url, error);
+    console.error("Error in tmdbScrape with URL:", url, error);
     throw new Error("Error in tmdbScrape function.");
   }
 }
